@@ -23,7 +23,7 @@ ksa_tz = pytz.timezone('Asia/Riyadh')
 # الفريمات المطلوبة للمتابعة
 TIMEFRAMES = ['15m', '1h', '4h', '1d', '1w']
 
-# ذاكرة مؤقتة لمنع تكرار الإرسال لنفس الشمعة (لتجنب العشوائية وضمان الدقة الزمنية)
+# ذاكرة لمنع تكرار الإرسال لنفس الشمعة
 sent_signals_cache = set()
 
 def send_telegram_message(message):
@@ -112,24 +112,20 @@ def check_markets():
                     
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
-                    # أخذ وقت توقيت الشمعة الحالية لضمان عدم التكرار وإرسالها بدقة عند ظهورها
-                    current_candle_time = df['timestamp'].iloc[-1]
-                    signal_key = f"{clean_name}_{tf}_{current_candle_time}"
+                    # التحقق من توقيت الشمعة الحقيقية بالمللي ثانية
+                    candle_timestamp = df['timestamp'].iloc[-1]
+                    signal_key = f"{clean_name}_{tf}_{candle_timestamp}"
                     
+                    if signal_key in sent_signals_cache:
+                        continue
+                        
                     current_price = df['close'].iloc[-1]
-                    
                     signal_type, score, strength = calculate_indicator_logic(df)
                     
                     if signal_type:
-                        # التحقق مما إذا تم إرسال تنبيه لهذه الشمعة مسبقاً
-                        if signal_key in sent_signals_cache:
-                            continue
-                        
-                        # تسجيل الشمعة في الذاكرة حتى لا يتكرر تنبيهها
+                        # قفل التنبيه لهذه الشمعة فوراً لمنع التكرار
                         sent_signals_cache.add(signal_key)
-                        
-                        # تنظيف الذاكرة إذا كبرت جداً لمنع امتلاء الذاكرة العشوائية
-                        if len(sent_signals_cache) > 5000:
+                        if len(sent_signals_cache) > 4000:
                             sent_signals_cache.clear()
                             
                         current_time_ksa = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -164,7 +160,7 @@ def check_markets():
                             )
                         
                         send_telegram_message(message)
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                         
                 except Exception as e:
                     continue
@@ -173,10 +169,11 @@ def check_markets():
         print(f"Error loading markets: {e}")
 
 if __name__ == "__main__":
-    print("Bot is running with precise candle timing & duplicate prevention...")
+    print("Bot is running with strict synchronization...")
     test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم تحديث البوت بنظام منع التكرار وضبط توقيت الشموع بدقة!\n⚡️ الوقت: {test_time}")
+    send_telegram_message(f"✅ تم ضبط دقة توقيت الإشارات ومنع العشوائية بنجاح!\n⚡️ الوقت: {test_time}")
     
     while True:
         check_markets()
-        time.sleep(30)
+        # تقليص وقت الانتظار لجعل الدورة أسرع ومزامنة التوقيت بدقة عالية
+        time.sleep(15)
