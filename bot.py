@@ -9,21 +9,21 @@ import pytz
 TELEGRAM_BOT_TOKEN = "8711875284:AAGGERDv9njI0QZ9Fnrc1_tN9xeVLEXtnCc"
 TELEGRAM_CHAT_ID = "-1004394911035"
 
-# تهيئة منصة باينانس للفيوتشر
+# تهيئة منصة باينانس للفيوتشر مع تفعيل Rate Limit التلقائي
 exchange = ccxt.binance({
     'options': {
         'defaultType': 'future',
     },
-    'enableRateLimit': True
+    'enableRateLimit': True,
+    'rateLimit': 1200  # زيادة المهلة بين الطلبات لحماية الـ IP من الحظر
 })
 
 # التوقيت المحلي (السعودية)
 ksa_tz = pytz.timezone('Asia/Riyadh')
 
-# الفريمات المحددة فقط (15 دقيقة، ساعة، 4 ساعات)
+# الفريمات المحددة فقط
 TIMEFRAMES = ['15m', '1h', '4h']
 
-# ذاكرة لمنع تكرار الإرسال لنفس الشمعة
 sent_signals_cache = set()
 
 def send_telegram_message(message):
@@ -101,6 +101,7 @@ def check_markets():
         symbols = [symbol for symbol in markets if symbol.endswith('/USDT:USDT') or symbol.endswith(':USDT')]
         
         now_utc = datetime.datetime.now(timezone.utc)
+        print(f"Starting scan for {len(symbols)} symbols...")
         
         for symbol in symbols:
             clean_name = symbol.split('/')[0].replace(':', '')
@@ -114,19 +115,13 @@ def check_markets():
                     
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
-                    # توقيت الشمعة الأخيرة بالمللي ثانية وتحويله إلى UTC
                     candle_timestamp_ms = df['timestamp'].iloc[-1]
                     candle_time_utc = datetime.datetime.fromtimestamp(candle_timestamp_ms / 1000.0, tz=timezone.utc)
                     
-                    # التحقق من أن الشمعة حديثة التكوين وليست قديمة (لمنع العشوائية والتأخير)
-                    # السماح بفارق زمني بسيط حسب الفريم (مثلاً خلال أول دقيقتين من الشمعة)
                     age_seconds = (now_utc - candle_time_utc).total_seconds()
-                    
-                    # تحديد الحد الأقصى لعمر الشمعة المقبول للإرسال بناءً على الفريم
                     max_allowed_age = 120 if tf == '15m' else (300 if tf == '1h' else 600)
                     
                     if age_seconds > max_allowed_age:
-                        # الشمعة قديمة وليست وليدة اللحظة، تجاوزها لمنع الإرسال العشوائي
                         continue
                     
                     signal_key = f"{clean_name}_{tf}_{candle_timestamp_ms}"
@@ -173,19 +168,24 @@ def check_markets():
                             )
                         
                         send_telegram_message(message)
-                        time.sleep(0.1)
+                        
+                    # إبطاء الطلبات قليلاً لمنع الحظر من باينانس
+                    time.sleep(0.15)
                         
                 except Exception as e:
+                    # في حال حدوث خطأ ضغط الطلبات، ينتظر البوت قليلاً ليتجنب استمرار الحظر
+                    time.sleep(1)
                     continue
                 
     except Exception as e:
         print(f"Error loading markets: {e}")
 
 if __name__ == "__main__":
-    print("Bot is running with strict 3 timeframes and strict timing filters...")
+    print("Bot is running with safe rate limits...")
     test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم تحديث البوت (3 فريمات: 15m, 1h, 4h مع تصفية توقيت الشموع بدقة)\n⚡️ الوقت: {test_time}")
+    send_telegram_message(f"✅ تم تفعيل حماية الحظر وإبطاء الطلبات لتجنب أخطاء باينانس بنجاح!\n⚡️ الوقت: {test_time}")
     
     while True:
         check_markets()
-        time.sleep(15)
+        # الانتظار لفترة كافية بين الدورات الكاملة لتنظيف الـ IP وحماية الاتصال
+        time.sleep(60)
