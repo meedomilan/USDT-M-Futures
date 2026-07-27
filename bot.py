@@ -20,8 +20,8 @@ exchange = ccxt.binance({
 # التوقيت المحلي (السعودية)
 ksa_tz = pytz.timezone('Asia/Riyadh')
 
-# الفريمات المطلوبة للمتابعة
-TIMEFRAMES = ['15m', '1h', '4h', '1d', '1w']
+# الفريمات المحددة فقط (15 دقيقة، ساعة، 4 ساعات)
+TIMEFRAMES = ['15m', '1h', '4h']
 
 # ذاكرة لمنع تكرار الإرسال لنفس الشمعة
 sent_signals_cache = set()
@@ -100,6 +100,8 @@ def check_markets():
         markets = exchange.load_markets()
         symbols = [symbol for symbol in markets if symbol.endswith('/USDT:USDT') or symbol.endswith(':USDT')]
         
+        now_utc = datetime.datetime.now(timezone.utc)
+        
         for symbol in symbols:
             clean_name = symbol.split('/')[0].replace(':', '')
             hashtag = f"#{clean_name}.P#"
@@ -112,10 +114,22 @@ def check_markets():
                     
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
-                    # التحقق من توقيت الشمعة الحقيقية بالمللي ثانية
-                    candle_timestamp = df['timestamp'].iloc[-1]
-                    signal_key = f"{clean_name}_{tf}_{candle_timestamp}"
+                    # توقيت الشمعة الأخيرة بالمللي ثانية وتحويله إلى UTC
+                    candle_timestamp_ms = df['timestamp'].iloc[-1]
+                    candle_time_utc = datetime.datetime.fromtimestamp(candle_timestamp_ms / 1000.0, tz=timezone.utc)
                     
+                    # التحقق من أن الشمعة حديثة التكوين وليست قديمة (لمنع العشوائية والتأخير)
+                    # السماح بفارق زمني بسيط حسب الفريم (مثلاً خلال أول دقيقتين من الشمعة)
+                    age_seconds = (now_utc - candle_time_utc).total_seconds()
+                    
+                    # تحديد الحد الأقصى لعمر الشمعة المقبول للإرسال بناءً على الفريم
+                    max_allowed_age = 120 if tf == '15m' else (300 if tf == '1h' else 600)
+                    
+                    if age_seconds > max_allowed_age:
+                        # الشمعة قديمة وليست وليدة اللحظة، تجاوزها لمنع الإرسال العشوائي
+                        continue
+                    
+                    signal_key = f"{clean_name}_{tf}_{candle_timestamp_ms}"
                     if signal_key in sent_signals_cache:
                         continue
                         
@@ -123,9 +137,8 @@ def check_markets():
                     signal_type, score, strength = calculate_indicator_logic(df)
                     
                     if signal_type:
-                        # قفل التنبيه لهذه الشمعة فوراً لمنع التكرار
                         sent_signals_cache.add(signal_key)
-                        if len(sent_signals_cache) > 4000:
+                        if len(sent_signals_cache) > 3000:
                             sent_signals_cache.clear()
                             
                         current_time_ksa = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -169,11 +182,10 @@ def check_markets():
         print(f"Error loading markets: {e}")
 
 if __name__ == "__main__":
-    print("Bot is running with strict synchronization...")
+    print("Bot is running with strict 3 timeframes and strict timing filters...")
     test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم ضبط دقة توقيت الإشارات ومنع العشوائية بنجاح!\n⚡️ الوقت: {test_time}")
+    send_telegram_message(f"✅ تم تحديث البوت (3 فريمات: 15m, 1h, 4h مع تصفية توقيت الشموع بدقة)\n⚡️ الوقت: {test_time}")
     
     while True:
         check_markets()
-        # تقليص وقت الانتظار لجعل الدورة أسرع ومزامنة التوقيت بدقة عالية
         time.sleep(15)
