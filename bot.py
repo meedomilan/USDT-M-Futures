@@ -23,6 +23,9 @@ ksa_tz = pytz.timezone('Asia/Riyadh')
 # الفريمات المطلوبة للمتابعة
 TIMEFRAMES = ['15m', '1h', '4h', '1d', '1w']
 
+# ذاكرة مؤقتة لمنع تكرار الإرسال لنفس الشمعة (لتجنب العشوائية وضمان الدقة الزمنية)
+sent_signals_cache = set()
+
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -97,8 +100,6 @@ def check_markets():
         markets = exchange.load_markets()
         symbols = [symbol for symbol in markets if symbol.endswith('/USDT:USDT') or symbol.endswith(':USDT')]
         
-        print(f"Checking {len(symbols)} futures symbols across multiple timeframes...")
-        
         for symbol in symbols:
             clean_name = symbol.split('/')[0].replace(':', '')
             hashtag = f"#{clean_name}.P#"
@@ -110,11 +111,27 @@ def check_markets():
                         continue
                     
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    
+                    # أخذ وقت توقيت الشمعة الحالية لضمان عدم التكرار وإرسالها بدقة عند ظهورها
+                    current_candle_time = df['timestamp'].iloc[-1]
+                    signal_key = f"{clean_name}_{tf}_{current_candle_time}"
+                    
                     current_price = df['close'].iloc[-1]
                     
                     signal_type, score, strength = calculate_indicator_logic(df)
                     
                     if signal_type:
+                        # التحقق مما إذا تم إرسال تنبيه لهذه الشمعة مسبقاً
+                        if signal_key in sent_signals_cache:
+                            continue
+                        
+                        # تسجيل الشمعة في الذاكرة حتى لا يتكرر تنبيهها
+                        sent_signals_cache.add(signal_key)
+                        
+                        # تنظيف الذاكرة إذا كبرت جداً لمنع امتلاء الذاكرة العشوائية
+                        if len(sent_signals_cache) > 5000:
+                            sent_signals_cache.clear()
+                            
                         current_time_ksa = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
                         tv_link = f"https://www.tradingview.com/chart/?symbol=BINANCE:{clean_name}P"
                         binance_link = f"https://www.binance.com/en/futures/{clean_name}USDT"
@@ -147,7 +164,7 @@ def check_markets():
                             )
                         
                         send_telegram_message(message)
-                        time.sleep(0.3)
+                        time.sleep(0.2)
                         
                 except Exception as e:
                     continue
@@ -156,10 +173,10 @@ def check_markets():
         print(f"Error loading markets: {e}")
 
 if __name__ == "__main__":
-    print("Bot is running and monitoring Binance Futures across all timeframes...")
+    print("Bot is running with precise candle timing & duplicate prevention...")
     test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم تحديث وتشغيل بوت مراقبة العملات (متعدد الفريمات 15m, 1h, 4h, 1d, 1w) بنجاح!\n⚡️ الوقت: {test_time}")
+    send_telegram_message(f"✅ تم تحديث البوت بنظام منع التكرار وضبط توقيت الشموع بدقة!\n⚡️ الوقت: {test_time}")
     
     while True:
         check_markets()
-        time.sleep(60)
+        time.sleep(30)
