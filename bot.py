@@ -1,6 +1,5 @@
 import time
 import datetime
-from datetime import timezone, timedelta
 import ccxt
 import pandas as pd
 import requests
@@ -20,6 +19,9 @@ exchange = ccxt.binance({
 
 # التوقيت المحلي (السعودية)
 ksa_tz = pytz.timezone('Asia/Riyadh')
+
+# الفريمات المطلوبة للمتابعة
+TIMEFRAMES = ['15m', '1h', '4h', '1d', '1w']
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -95,69 +97,68 @@ def check_markets():
         markets = exchange.load_markets()
         symbols = [symbol for symbol in markets if symbol.endswith('/USDT:USDT') or symbol.endswith(':USDT')]
         
-        print(f"Checking {len(symbols)} futures symbols...")
-        timeframe = '15m'
+        print(f"Checking {len(symbols)} futures symbols across multiple timeframes...")
         
         for symbol in symbols:
-            try:
-                clean_name = symbol.split('/')[0].replace(':', '')
-                hashtag = f"#{clean_name}.P#"
-                
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=100)
-                if not ohlcv:
+            clean_name = symbol.split('/')[0].replace(':', '')
+            hashtag = f"#{clean_name}.P#"
+            
+            for tf in TIMEFRAMES:
+                try:
+                    ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=100)
+                    if not ohlcv:
+                        continue
+                    
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    current_price = df['close'].iloc[-1]
+                    
+                    signal_type, score, strength = calculate_indicator_logic(df)
+                    
+                    if signal_type:
+                        current_time_ksa = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
+                        tv_link = f"https://www.tradingview.com/chart/?symbol=BINANCE:{clean_name}P"
+                        binance_link = f"https://www.binance.com/en/futures/{clean_name}USDT"
+                        
+                        if signal_type == "BUY":
+                            message = (
+                                f"شارة مبكرة - فرصة شراء جديدة!\n"
+                                f"-----------------------------------\n"
+                                f"💰 العملة: {hashtag}\n"
+                                f"⏰ الفريم: {tf}\n"
+                                f"💲 السعر الحالي: {current_price}\n\n"
+                                f"🟢 النوع: علامة مبكرة للشراء (Buy Signal)\n"
+                                f"⚡️ وقت الظهور: {current_time_ksa} (توقيت السعودية)\n"
+                                f"⏳ حالة الشمعة: قيد التكوين ⚠️\n"
+                                f"🔥 قوة الإشارة: {strength} ({score:.1f}%)\n\n"
+                                f"🔗 [TradingView]({tv_link}) | [Binance Futures]({binance_link})"
+                            )
+                        else:
+                            message = (
+                                f"🚨 إشارة مبكرة - فرصة بيع جديدة!\n"
+                                f"-----------------------------------\n"
+                                f"💰 العملة: {hashtag}\n"
+                                f"⏰ الفريم: {tf}\n"
+                                f"💲 السعر الحالي: {current_price}\n\n"
+                                f"🔴 النوع: علامة مبكرة للبيع (Sell Signal)\n"
+                                f"⚡️ وقت الظهور: {current_time_ksa} (توقيت السعودية)\n"
+                                f"⏳ حالة الشمعة: قيد التكوين ⚠️\n"
+                                f"🔥 قوة الإشارة: {strength} ({score:.1f}%)\n\n"
+                                f"🔗 [TradingView]({tv_link}) | [Binance Futures]({binance_link})"
+                            )
+                        
+                        send_telegram_message(message)
+                        time.sleep(0.3)
+                        
+                except Exception as e:
                     continue
-                
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                current_price = df['close'].iloc[-1]
-                
-                signal_type, score, strength = calculate_indicator_logic(df)
-                
-                if signal_type:
-                    current_time_ksa = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-                    tv_link = f"https://www.tradingview.com/chart/?symbol=BINANCE:{clean_name}P"
-                    binance_link = f"https://www.binance.com/en/futures/{clean_name}USDT"
-                    
-                    if signal_type == "BUY":
-                        message = (
-                            f"شارة مبكرة - فرصة شراء جديدة!\n"
-                            f"-----------------------------------\n"
-                            f"💰 العملة: {hashtag}\n"
-                            f"⏰ الفريم: {timeframe}\n"
-                            f"💲 السعر الحالي: {current_price}\n\n"
-                            f"🟢 النوع: علامة مبكرة للشراء (Buy Signal)\n"
-                            f"⚡️ وقت الظهور: {current_time_ksa} (توقيت السعودية)\n"
-                            f"⏳ حالة الشمعة: قيد التكوين ⚠️\n"
-                            f"🔥 قوة الإشارة: {strength} ({score:.1f}%)\n\n"
-                            f"🔗 [TradingView]({tv_link}) | [Binance Futures]({binance_link})"
-                        )
-                    else:
-                        message = (
-                            f"🚨 إشارة مبكرة - فرصة بيع جديدة!\n"
-                            f"-----------------------------------\n"
-                            f"💰 العملة: {hashtag}\n"
-                            f"⏰ الفريم: {timeframe}\n"
-                            f"💲 السعر الحالي: {current_price}\n\n"
-                            f"🔴 النوع: علامة مبكرة للبيع (Sell Signal)\n"
-                            f"⚡️ وقت الظهور: {current_time_ksa} (توقيت السعودية)\n"
-                            f"⏳ حالة الشمعة: قيد التكوين ⚠️\n"
-                            f"🔥 قوة الإشارة: {strength} ({score:.1f}%)\n\n"
-                            f"🔗 [TradingView]({tv_link}) | [Binance Futures]({binance_link})"
-                        )
-                    
-                    send_telegram_message(message)
-                    time.sleep(0.5)
-                    
-            except Exception as e:
-                continue
                 
     except Exception as e:
         print(f"Error loading markets: {e}")
 
 if __name__ == "__main__":
-    print("Bot is running and monitoring Binance Futures...")
-    # رسالة اختبارية للتأكد من عمل البوت وقناة التلجرام فور التشغيل
+    print("Bot is running and monitoring Binance Futures across all timeframes...")
     test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم تشغيل بوت مراقبة عملات الفيوتشر بنجاح!\n⚡️ وقت البدء: {test_time} (توقيت السعودية)\nالبوت يبحث الآن عن الإشارات الحقيقية... 🚀")
+    send_telegram_message(f"✅ تم تحديث وتشغيل بوت مراقبة العملات (متعدد الفريمات 15m, 1h, 4h, 1d, 1w) بنجاح!\n⚡️ الوقت: {test_time}")
     
     while True:
         check_markets()
