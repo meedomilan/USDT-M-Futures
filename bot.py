@@ -1,5 +1,6 @@
 import time
 import datetime
+from datetime import timezone
 import ccxt
 import pandas as pd
 import requests
@@ -15,7 +16,7 @@ exchange = ccxt.binance({
         'defaultType': 'future',
     },
     'enableRateLimit': True,
-    'rateLimit': 1200  # زيادة المهلة بين الطلبات لحماية الـ IP من الحظر
+    'rateLimit': 1200
 })
 
 # التوقيت المحلي (السعودية)
@@ -169,11 +170,9 @@ def check_markets():
                         
                         send_telegram_message(message)
                         
-                    # إبطاء الطلبات قليلاً لمنع الحظر من باينانس
                     time.sleep(0.15)
                         
                 except Exception as e:
-                    # في حال حدوث خطأ ضغط الطلبات، ينتظر البوت قليلاً ليتجنب استمرار الحظر
                     time.sleep(1)
                     continue
                 
@@ -183,9 +182,8 @@ def check_markets():
 if __name__ == "__main__":
     print("Bot is running with safe rate limits...")
     test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم تفعيل حماية الحظر وإبطاء الطلبات لتجنب أخطاء باينانس بنجاح!\n⚡️ الوقت: {test_time}")
+    send_telegram_message(f"✅ تم إصلاح الخطأ وتشغيل البوت بنجاح!\n⚡️ الوقت: {test_time}")
     
     while True:
         check_markets()
-        # الانتظار لفترة كافية بين الدورات الكاملة لتنظيف الـ IP وحماية الاتصال
         time.sleep(60)
