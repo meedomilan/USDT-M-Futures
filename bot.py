@@ -7,12 +7,11 @@ import numpy as np
 from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
-app = Flask(__name__)
+app = FlaskName = Flask(__name__)
 
 TELEGRAM_TOKEN = "8711875284:AAGGERDv9njI0QZ9Fnrc1_tN9xeVLEXtnCc"
 CHAT_ID = "-1004394911035"
 
-# جلب جميع عملات الفيوتشر النشطة من باينانس
 def get_binance_futures_symbols():
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
@@ -24,7 +23,6 @@ def get_binance_futures_symbols():
         print(f"Error fetching symbols: {e}")
     return []
 
-# جلب الشموع التاريخية (Klines)
 def get_historical_klines(symbol, interval, limit=100):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
@@ -40,12 +38,13 @@ def get_historical_klines(symbol, interval, limit=100):
             df['high'] = df['high'].astype(float)
             df['low'] = df['low'].astype(float)
             df['open'] = df['open'].astype(float)
+            # استخراج وقت الشمعة الحقيقي من بيانات باينانس مباشرة وضبطه (UTC+3)
+            df['candle_time'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=3)
             return df
     except Exception as e:
         pass
     return None
 
-# حساب مؤشر RSI وتكتيك الدايفرجنس المخفي (Hidden Divergence)
 def calculate_rsi_and_divergence(df, period=14):
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -65,22 +64,18 @@ def calculate_rsi_and_divergence(df, period=14):
     curr_rsi = rsis[-2]
     prev_rsi = rsis[-15]
     
-    # دايفرجنس مخفي صاعد
     hidden_bull = (curr_low > prev_low) and (curr_rsi < prev_rsi) and (rsis[-1] > rsis[-2])
     
     curr_high = highs[-2]
     prev_high = highs[-15]
     
-    # دايفرجنس مخفي هابط
     hidden_bear = (curr_high < prev_high) and (curr_rsi > prev_rsi) and (rsis[-1] < rsis[-2])
     
     return hidden_bull, hidden_bear
 
-# إرسال التنبيه إلى تيليجرام بالتنسيق المطلوب مع ضبط التوقيت المحلي
-def send_telegram_alert(symbol, interval_str, div_type, price):
-    # ضبط التوقيت المحلي (إضافة 3 ساعات لتوقيت UTC لتتوافق مع توقيت السعودية/منطقتك)
-    local_time = datetime.utcnow() + timedelta(hours=3)
-    formatted_time = local_time.strftime('%Y-%m-%d %H:%M:%S')
+def send_telegram_alert(symbol, interval_str, div_type, price, candle_time):
+    # استخدام وقت الشمعة الفعلي القادم من باينانس مباشرة لضمان التطابق التام
+    formatted_time = candle_time.strftime('%Y-%m-%d %H:%M:%S')
 
     text = f"""🚨 تنبيه دايفرجنس جديد
 
@@ -97,7 +92,6 @@ def send_telegram_alert(symbol, interval_str, div_type, price):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# مهمة الفحص الدورية للعملات
 def scan_market():
     symbols = get_binance_futures_symbols()
     intervals = {"15m": "15", "1h": "60"}
@@ -107,21 +101,21 @@ def scan_market():
             df = get_historical_klines(symbol, binance_tf, limit=50)
             if df is not None and not df.empty:
                 h_bull, h_bear = calculate_rsi_and_divergence(df)
-                current_price = df['close'].iloc[-2] # شمعة مغلقة لتجنب الإشارات الوهمية
+                current_price = df['close'].iloc[-2]
+                candle_time = df['candle_time'].iloc[-2] # وقت الشمعة المغلقة بدقة
                 
                 if h_bull:
-                    send_telegram_alert(symbol, label_tf, "Hidden Bullish Divergence", current_price)
+                    send_telegram_alert(symbol, label_tf, "Hidden Bullish Divergence", current_price, candle_time)
                 if h_bear:
-                    send_telegram_alert(symbol, label_tf, "Hidden Bearish Divergence", current_price)
+                    send_telegram_alert(symbol, label_tf, "Hidden Bearish Divergence", current_price, candle_time)
             time.sleep(0.1)
 
 @app.route("/")
 def home():
-    return "Bot is running successfully with correct timezone!"
+    return "Bot is running with exact candle timezone!"
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
-    # فحص السوق كل دقيقتين لرصد إغلاق الشموع في وقتها
     scheduler.add_job(func=scan_market, trigger="interval", minutes=2)
     scheduler.start()
     
