@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime, timedelta
 import requests
 import pandas as pd
 import numpy as np
@@ -52,38 +53,42 @@ def calculate_rsi_and_divergence(df, period=14):
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # فحص القمم والقيعان للدايفرجنس المخفي بآخر شمعة مغلقة
     if len(df) < 30:
         return None, None
         
-    # قاع مخفي صاعد: السعر صنع قاع أعلى، بينما RSI صنع قاع أقل
     lows = df['low'].values
+    highs = df['high'].values
     rsis = df['rsi'].values
     
-    # ابسط كشف للدايفرجنس المخفي على آخر قيعان محددة
-    # (يمكن توسيع الشروط لتطابق دقة مؤشرك تماماً)
     curr_low = lows[-2]
     prev_low = lows[-15]
     curr_rsi = rsis[-2]
     prev_rsi = rsis[-15]
     
+    # دايفرجنس مخفي صاعد
     hidden_bull = (curr_low > prev_low) and (curr_rsi < prev_rsi) and (rsis[-1] > rsis[-2])
     
-    curr_high = highs = df['high'].values[-2]
-    prev_high = df['high'].values[-15]
+    curr_high = highs[-2]
+    prev_high = highs[-15]
+    
+    # دايفرجنس مخفي هابط
     hidden_bear = (curr_high < prev_high) and (curr_rsi > prev_rsi) and (rsis[-1] < rsis[-2])
     
     return hidden_bull, hidden_bear
 
-# إرسال التنبيه إلى تيليجرام بالتنسيق المطلوب
+# إرسال التنبيه إلى تيليجرام بالتنسيق المطلوب مع ضبط التوقيت المحلي
 def send_telegram_alert(symbol, interval_str, div_type, price):
+    # ضبط التوقيت المحلي (إضافة 3 ساعات لتوقيت UTC لتتوافق مع توقيت السعودية/منطقتك)
+    local_time = datetime.utcnow() + timedelta(hours=3)
+    formatted_time = local_time.strftime('%Y-%m-%d %H:%M:%S')
+
     text = f"""🚨 تنبيه دايفرجنس جديد
 
 🪙 العملة: {symbol}#
 ⏱️ الفريم: {interval_str}
 📊 نوع التنبيه: {div_type}
 💵 السعر الحالي: {price:.4f}
-⏰ الوقت: {time.strftime('%Y-%m-%d %H:%M:%S')}"""
+⏰ الوقت: {formatted_time}"""
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text}
@@ -108,15 +113,15 @@ def scan_market():
                     send_telegram_alert(symbol, label_tf, "Hidden Bullish Divergence", current_price)
                 if h_bear:
                     send_telegram_alert(symbol, label_tf, "Hidden Bearish Divergence", current_price)
-            time.sleep(0.1) # لمنع حظر الطلبات من باينانس
+            time.sleep(0.1)
 
 @app.route("/")
 def home():
-    return "Bot is running successfully!"
+    return "Bot is running successfully with correct timezone!"
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
-    # يتم فحص السوق كل دقيقتين لضمان رصد الإغلاق اللحظي للفريمات
+    # فحص السوق كل دقيقتين لرصد إغلاق الشموع في وقتها
     scheduler.add_job(func=scan_market, trigger="interval", minutes=2)
     scheduler.start()
     
