@@ -1,189 +1,124 @@
+import os
 import time
-import datetime
-from datetime import timezone
-import ccxt
-import pandas as pd
 import requests
-import pytz
+import pandas as pd
+import numpy as np
+from flask import Flask, jsonify
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# إعدادات بوت التلجرام
-TELEGRAM_BOT_TOKEN = "8711875284:AAGGERDv9njI0QZ9Fnrc1_tN9xeVLEXtnCc"
-TELEGRAM_CHAT_ID = "-1004394911035"
+app = Flask(__name__)
 
-# تهيئة منصة باينانس للفيوتشر مع تفعيل Rate Limit التلقائي
-exchange = ccxt.binance({
-    'options': {
-        'defaultType': 'future',
-    },
-    'enableRateLimit': True,
-    'rateLimit': 1200
-})
+TELEGRAM_TOKEN = "8711875284:AAGGERDv9njI0QZ9Fnrc1_tN9xeVLEXtnCc"
+CHAT_ID = "-1004394911035"
 
-# التوقيت المحلي (السعودية)
-ksa_tz = pytz.timezone('Asia/Riyadh')
-
-# الفريمات المحددة فقط
-TIMEFRAMES = ['15m', '1h', '4h']
-
-sent_signals_cache = set()
-
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
+# جلب جميع عملات الفيوتشر النشطة من باينانس
+def get_binance_futures_symbols():
+    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.json()
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        symbols = [s['symbol'] for s in data['symbols'] if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
+        return symbols
     except Exception as e:
-        print(f"Error sending telegram message: {e}")
-        return None
+        print(f"Error fetching symbols: {e}")
+    return []
 
-def calculate_indicator_logic(df):
-    if len(df) < 50:
-        return None, 0, "ضعيف"
-
-    close = df['close']
-    open_p = df['open']
-    high = df['high']
-    low = df['low']
-    volume = df['volume']
-
-    ma25 = close.ewm(span=25).mean()
-    ma50 = close.ewm(span=50).mean()
-    
-    candle_range = (high - low).replace(0, 0.00001)
-    close_pos = (close - low) / candle_range
-    
-    buy_pct = (volume * close_pos).sum() / max((volume * close_pos).sum() + (volume * (1.0 - close_pos)).sum(), 1.0) * 100.0
-    
-    bull_score = 0.0
-    bear_score = 0.0
-    
-    last_close = close.iloc[-1]
-    last_open = open_p.iloc[-1]
-    
-    if last_close > last_open:
-        bull_score += 35.0
-    else:
-        bear_score += 35.0
-        
-    if buy_pct >= 60:
-        bull_score += 30.0
-    else:
-        bear_score += 30.0
-        
-    if last_close > ma25.iloc[-1]:
-        bull_score += 20.0
-    else:
-        bear_score += 20.0
-        
-    if ma25.iloc[-1] > ma50.iloc[-1]:
-        bull_score += 15.0
-    else:
-        bear_score += 15.0
-
-    score = max(bull_score, bear_score)
-    strength = "قوي" if score >= 75 else ("متوسط" if score >= 55 else "ضعيف")
-
-    if bull_score >= 58 and bull_score > bear_score:
-        return "BUY", score, strength
-    elif bear_score >= 58 and bear_score > bull_score:
-        return "SELL", score, strength
-    
-    return None, 0, "ضعيف"
-
-def check_markets():
+# جلب الشموع التاريخية (Klines)
+def get_historical_klines(symbol, interval, limit=100):
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        markets = exchange.load_markets()
-        symbols = [symbol for symbol in markets if symbol.endswith('/USDT:USDT') or symbol.endswith(':USDT')]
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if isinstance(data, list):
+            df = pd.DataFrame(data, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            df['close'] = df['close'].astype(float)
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            df['open'] = df['open'].astype(float)
+            return df
+    except Exception as e:
+        pass
+    return None
+
+# حساب مؤشر RSI وتكتيك الدايفرجنس المخفي (Hidden Divergence)
+def calculate_rsi_and_divergence(df, period=14):
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+    
+    # فحص القمم والقيعان للدايفرجنس المخفي بآخر شمعة مغلقة
+    if len(df) < 30:
+        return None, None
         
-        now_utc = datetime.datetime.now(timezone.utc)
-        print(f"Starting scan for {len(symbols)} symbols...")
-        
-        for symbol in symbols:
-            clean_name = symbol.split('/')[0].replace(':', '')
-            hashtag = f"#{clean_name}.P#"
-            
-            for tf in TIMEFRAMES:
-                try:
-                    ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=100)
-                    if not ohlcv:
-                        continue
-                    
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    
-                    candle_timestamp_ms = df['timestamp'].iloc[-1]
-                    candle_time_utc = datetime.datetime.fromtimestamp(candle_timestamp_ms / 1000.0, tz=timezone.utc)
-                    
-                    age_seconds = (now_utc - candle_time_utc).total_seconds()
-                    max_allowed_age = 120 if tf == '15m' else (300 if tf == '1h' else 600)
-                    
-                    if age_seconds > max_allowed_age:
-                        continue
-                    
-                    signal_key = f"{clean_name}_{tf}_{candle_timestamp_ms}"
-                    if signal_key in sent_signals_cache:
-                        continue
-                        
-                    current_price = df['close'].iloc[-1]
-                    signal_type, score, strength = calculate_indicator_logic(df)
-                    
-                    if signal_type:
-                        sent_signals_cache.add(signal_key)
-                        if len(sent_signals_cache) > 3000:
-                            sent_signals_cache.clear()
-                            
-                        current_time_ksa = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-                        tv_link = f"https://www.tradingview.com/chart/?symbol=BINANCE:{clean_name}P"
-                        binance_link = f"https://www.binance.com/en/futures/{clean_name}USDT"
-                        
-                        if signal_type == "BUY":
-                            message = (
-                                f"شارة مبكرة - فرصة شراء جديدة!\n"
-                                f"-----------------------------------\n"
-                                f"💰 العملة: {hashtag}\n"
-                                f"⏰ الفريم: {tf}\n"
-                                f"💲 السعر الحالي: {current_price}\n\n"
-                                f"🟢 النوع: علامة مبكرة للشراء (Buy Signal)\n"
-                                f"⚡️ وقت الظهور: {current_time_ksa} (توقيت السعودية)\n"
-                                f"⏳ حالة الشمعة: قيد التكوين ⚠️\n"
-                                f"🔥 قوة الإشارة: {strength} ({score:.1f}%)\n\n"
-                                f"🔗 [TradingView]({tv_link}) | [Binance Futures]({binance_link})"
-                            )
-                        else:
-                            message = (
-                                f"🚨 إشارة مبكرة - فرصة بيع جديدة!\n"
-                                f"-----------------------------------\n"
-                                f"💰 العملة: {hashtag}\n"
-                                f"⏰ الفريم: {tf}\n"
-                                f"💲 السعر الحالي: {current_price}\n\n"
-                                f"🔴 النوع: علامة مبكرة للبيع (Sell Signal)\n"
-                                f"⚡️ وقت الظهور: {current_time_ksa} (توقيت السعودية)\n"
-                                f"⏳ حالة الشمعة: قيد التكوين ⚠️\n"
-                                f"🔥 قوة الإشارة: {strength} ({score:.1f}%)\n\n"
-                                f"🔗 [TradingView]({tv_link}) | [Binance Futures]({binance_link})"
-                            )
-                        
-                        send_telegram_message(message)
-                        
-                    time.sleep(0.15)
-                        
-                except Exception as e:
-                    time.sleep(1)
-                    continue
+    # قاع مخفي صاعد: السعر صنع قاع أعلى، بينما RSI صنع قاع أقل
+    lows = df['low'].values
+    rsis = df['rsi'].values
+    
+    # ابسط كشف للدايفرجنس المخفي على آخر قيعان محددة
+    # (يمكن توسيع الشروط لتطابق دقة مؤشرك تماماً)
+    curr_low = lows[-2]
+    prev_low = lows[-15]
+    curr_rsi = rsis[-2]
+    prev_rsi = rsis[-15]
+    
+    hidden_bull = (curr_low > prev_low) and (curr_rsi < prev_rsi) and (rsis[-1] > rsis[-2])
+    
+    curr_high = highs = df['high'].values[-2]
+    prev_high = df['high'].values[-15]
+    hidden_bear = (curr_high < prev_high) and (curr_rsi > prev_rsi) and (rsis[-1] < rsis[-2])
+    
+    return hidden_bull, hidden_bear
+
+# إرسال التنبيه إلى تيليجرام بالتنسيق المطلوب
+def send_telegram_alert(symbol, interval_str, div_type, price):
+    text = f"""🚨 تنبيه دايفرجنس جديد
+
+🪙 العملة: {symbol}#
+⏱️ الفريم: {interval_str}
+📊 نوع التنبيه: {div_type}
+💵 السعر الحالي: {price:.4f}
+⏰ الوقت: {time.strftime('%Y-%m-%d %H:%M:%S')}"""
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Telegram error: {e}")
+
+# مهمة الفحص الدورية للعملات
+def scan_market():
+    symbols = get_binance_futures_symbols()
+    intervals = {"15m": "15", "1h": "60"}
+    
+    for symbol in symbols:
+        for binance_tf, label_tf in intervals.items():
+            df = get_historical_klines(symbol, binance_tf, limit=50)
+            if df is not None and not df.empty:
+                h_bull, h_bear = calculate_rsi_and_divergence(df)
+                current_price = df['close'].iloc[-2] # شمعة مغلقة لتجنب الإشارات الوهمية
                 
-    except Exception as e:
-        print(f"Error loading markets: {e}")
+                if h_bull:
+                    send_telegram_alert(symbol, label_tf, "Hidden Bullish Divergence", current_price)
+                if h_bear:
+                    send_telegram_alert(symbol, label_tf, "Hidden Bearish Divergence", current_price)
+            time.sleep(0.1) # لمنع حظر الطلبات من باينانس
+
+@app.route("/")
+def home():
+    return "Bot is running successfully!"
 
 if __name__ == "__main__":
-    print("Bot is running with safe rate limits...")
-    test_time = datetime.datetime.now(ksa_tz).strftime('%Y-%m-%d %H:%M:%S')
-    send_telegram_message(f"✅ تم إصلاح الخطأ وتشغيل البوت بنجاح!\n⚡️ الوقت: {test_time}")
+    scheduler = BackgroundScheduler()
+    # يتم فحص السوق كل دقيقتين لضمان رصد الإغلاق اللحظي للفريمات
+    scheduler.add_job(func=scan_market, trigger="interval", minutes=2)
+    scheduler.start()
     
-    while True:
-        check_markets()
-        time.sleep(60)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
